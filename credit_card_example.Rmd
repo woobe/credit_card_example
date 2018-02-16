@@ -1,0 +1,254 @@
+---
+title: 'Credit Card Fraud Detection Example'
+output:
+  html_document:
+    fig_height: 6
+    fig_width: 9
+    highlight: tango
+    number_sections: yes
+    theme: spacelab
+    toc: yes
+    toc_depth: 2
+  html_notebook:
+    fig_height: 8
+    fig_width: 10
+    highlight: tango
+    theme: spacelab
+    toc_depth: 2
+---
+
+# Introduction
+
+Source: https://www.kaggle.com/mlg-ulb/creditcardfraud
+
+The datasets contains transactions made by credit cards in September 2013 by european cardholders. This dataset presents transactions that occurred in two days, where we have 492 frauds out of 284,807 transactions. The dataset is highly unbalanced, the positive class (frauds) account for 0.172% of all transactions.
+
+It contains only numerical input variables which are the result of a PCA transformation. Unfortunately, due to confidentiality issues, we cannot provide the original features and more background information about the data. Features V1, V2, ... V28 are the principal components obtained with PCA, the only features which have not been transformed with PCA are 'Time' and 'Amount'. Feature 'Time' contains the seconds elapsed between each transaction and the first transaction in the dataset. The feature 'Amount' is the transaction Amount, this feature can be used for example-dependant cost-senstive learning. Feature 'Class' is the response variable and it takes value 1 in case of fraud and 0 otherwise.
+
+
+# H2O in R 
+
+```{r}
+# Start H2O Local Cluster
+library(h2o)
+h2o.init(nthreads = -1, max_mem_size = "8g")
+h2o.no_progress() # disable the progress bar in HTML output
+```
+
+
+# Data
+
+```{r}
+# import credit card data
+h_creditcard = h2o.importFile("creditcard.csv")
+```
+
+
+```{r}
+# Convert "Class" into factor
+h_creditcard$Class = as.factor(h_creditcard$Class)
+h2o.table(h_creditcard$Class)
+```
+
+```{r}
+# Quick look
+head(h_creditcard)
+summary(h_creditcard)
+```
+
+```{r}
+# Split data into training / validation / holdout
+h_split = h2o.splitFrame(h_creditcard, ratios = c(0.8, 0.1), seed = 1234)
+h_train = h_split[[1]] 
+h_valid = h_split[[2]] 
+h_holdout = h_split[[3]] 
+```
+
+```{r}
+# Quick look
+h2o.table(h_train$Class) 
+h2o.table(h_valid$Class) 
+h2o.table(h_holdout$Class) 
+```
+
+
+# Supervised Learning: Build a Baseline (Random Forest) Model 
+
+```{r}
+# Define features
+features = setdiff(colnames(h_creditcard), "Class")
+print(features)
+```
+
+```{r}
+# Baseline Random Forest model
+model_baseline = h2o.randomForest(x = features,
+                                     y = "Class",
+                                     training_frame = h_train,
+                                     validation_frame = h_valid,
+                                     model_id = "baseline",
+                                     seed = 1234)
+print(model_baseline)
+```
+
+```{r}
+# Check performance on holdout
+h2o.performance(model_baseline, newdata = h_holdout)
+```
+
+```{r}
+# Variable Importance
+h2o.varimp(model_baseline)
+```
+
+```{r}
+# Variable Importance Plot
+h2o.varimp_plot(model_baseline)
+```
+
+
+
+# Unsupervised Learning: Reconstruction with Autoencoder
+
+```{r}
+model_autoenc = h2o.deeplearning(x = features,
+                                 training_frame = h_train,
+                                 validation_frame = h_valid,
+                                 model_id = "autoencoder",
+                                 autoencoder = TRUE,
+                                 hidden = c(15),
+                                 epochs = 10,
+                                 activation = "Tanh",
+                                 reproducible = TRUE,
+                                 seed = 1234)
+print(model_autoenc)
+```
+
+
+```{r}
+# Calculate reconstruction errors (MSE) on training dataset
+recon_err_train = h2o.anomaly(model_autoenc, h_train, per_feature = FALSE)
+summary(recon_err_train)
+h2o.hist(recon_err_train, breaks = 1000)
+```
+
+
+```{r}
+# Calculate reconstruction errors (MSE) on validation
+recon_err_valid = h2o.anomaly(model_autoenc, h_valid, per_feature = FALSE)
+summary(recon_err_valid)
+h2o.hist(recon_err_valid, breaks = 1000)
+```
+
+
+```{r}
+# Calculate reconstruction errors (MSE) on holdout
+recon_err_holdout = h2o.anomaly(model_autoenc, h_holdout, per_feature = FALSE)
+summary(recon_err_holdout)
+h2o.hist(recon_err_holdout, breaks = 1000)
+```
+
+
+
+```{r}
+d_recon_error_train = data.frame(Class = as.data.frame(h_train$Class),
+                                 as.data.frame(recon_err_train)) 
+head(d_recon_error_train)
+plot(d_recon_error_train)
+plot(d_recon_error_train, ylim = c(0, 0.01))
+```
+
+
+```{r}
+# Quick look
+quantile(d_recon_error_train[d_recon_error_train$Class == 0,]$Reconstruction.MSE)
+quantile(d_recon_error_train[d_recon_error_train$Class == 1,]$Reconstruction.MSE)
+```
+
+```{r}
+# define threshold
+threshold = quantile(d_recon_error_train[d_recon_error_train$Class == 0,]$Reconstruction.MSE, probs = 0.9)
+cat("Threshold:", threshold)
+```
+
+
+# Split into two groups (Expected & Anomalies)
+
+```{r}
+row_train_exp = which(d_recon_error_train$Reconstruction.MSE < threshold)
+length(row_train_exp)
+```
+
+```{r}
+row_train_ano = which(d_recon_error_train$Reconstruction.MSE >= threshold)
+length(row_train_ano)
+```
+
+```{r}
+# Split training data
+h_train_exp = h_train[row_train_exp,]
+h_train_ano = h_train[row_train_ano,]
+```
+
+```{r}
+# Quick look
+summary(h_train_exp$Class)
+summary(h_train_ano$Class)
+```
+
+```{r}
+# Train same baseline random forest model with group "Expected"
+model_exp = h2o.randomForest(x = features,
+                             y = "Class",
+                             training_frame = h_train_exp,
+                             validation_frame = h_valid,
+                             model_id = "expected",
+                             seed = 1234)
+model_exp
+```
+
+
+
+```{r}
+# Train same baseline random forest model with group "Anomalies"
+model_ano = h2o.randomForest(x = features,
+                             y = "Class",
+                             training_frame = h_train_ano,
+                             validation_frame = h_valid,
+                             model_id = "anomalies",
+                             seed = 1234)
+model_ano
+```
+
+```{r}
+# Check performance on holdout
+h2o.performance(model_exp, newdata = h_holdout)
+h2o.performance(model_ano, newdata = h_holdout)
+```
+
+
+```{r}
+# Bag the two models for holdout
+yhat_holdout_exp = h2o.predict(model_exp, h_holdout)
+yhat_holdout_ano = h2o.predict(model_ano, h_holdout)
+yhat_holdout_bag = data.frame(exp = as.data.frame(yhat_holdout_exp$p1),
+                            ano = as.data.frame(yhat_holdout_ano$p1))
+yhat_holdout_bag$avg = rowMeans(yhat_holdout_bag)
+summary(yhat_holdout_bag)
+```
+
+
+
+```{r}
+# Evaluate performance
+library(Metrics)
+d_eval_holdout = data.frame(as.data.frame(h_holdout$Class),
+                          predicted = yhat_holdout_bag$avg)
+auc_holdout = Metrics::auc(d_eval_holdout$Class, d_eval_holdout$predicted)
+
+cat("AUC Holdout (Baseline):", h2o.auc(h2o.performance(model_baseline, h_holdout)))
+cat("AUC Holdout (Bagging):", auc_holdout)
+
+```
+
+

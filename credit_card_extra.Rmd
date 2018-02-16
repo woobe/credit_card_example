@@ -1,0 +1,122 @@
+---
+title: 'Credit Card Fraud Detection Example (Extra)'
+output:
+  html_document:
+    fig_height: 6
+    fig_width: 9
+    highlight: tango
+    number_sections: yes
+    theme: spacelab
+    toc: yes
+    toc_depth: 2
+  html_notebook:
+    fig_height: 8
+    fig_width: 10
+    highlight: tango
+    theme: spacelab
+    toc_depth: 2
+---
+
+# Introduction
+
+- Training models with H2O AutoML
+
+
+# H2O in R 
+
+```{r}
+# Start H2O Local Cluster
+library(h2o)
+h2o.init(nthreads = -1, max_mem_size = "8g")
+h2o.no_progress() # disable the progress bar in HTML output
+```
+
+
+# Data
+
+```{r}
+# import credit card data
+h_creditcard = h2o.importFile("creditcard.csv")
+```
+
+
+```{r}
+# Convert "Class" into factor
+h_creditcard$Class = as.factor(h_creditcard$Class)
+h2o.table(h_creditcard$Class)
+```
+
+```{r}
+# Quick look
+head(h_creditcard)
+summary(h_creditcard)
+```
+
+```{r}
+# Split data into training / validation / holdout
+h_split = h2o.splitFrame(h_creditcard, ratios = c(0.8, 0.1), seed = 1234)
+h_train = h_split[[1]] 
+h_valid = h_split[[2]] 
+h_holdout = h_split[[3]] 
+```
+
+```{r}
+# Quick look
+h2o.table(h_train$Class) 
+h2o.table(h_valid$Class) 
+h2o.table(h_holdout$Class) 
+```
+
+
+# Supervised Learning: Build a Baseline (Random Forest) Model 
+
+```{r}
+# Define features
+features = setdiff(colnames(h_creditcard), "Class")
+print(features)
+```
+
+```{r}
+# Baseline Random Forest model
+model_baseline = h2o.randomForest(x = features,
+                                     y = "Class",
+                                     training_frame = h_train,
+                                     validation_frame = h_valid,
+                                     model_id = "baseline",
+                                     seed = 1234)
+print(model_baseline)
+```
+
+```{r}
+# Check performance on holdout
+h2o.performance(model_baseline, newdata = h_holdout)
+```
+
+
+# Supervised Learning: Build a Stacked Ensemble with AutoML 
+
+```{r}
+model_automl = h2o.automl(x = features,
+                          y = "Class",
+                          training_frame = h_train,
+                          validation_frame = h_valid,
+                          nfolds = 5,
+                          # max_runtime_secs = 300,
+                          max_models = 10,
+                          stopping_metric = "AUC",
+                          project_name = "credit_card",
+                          seed = 1234)
+model_automl
+```
+
+```{r}
+# Extra best model
+model_best = model_automl@leader
+model_best
+```
+
+```{r}
+# Evaludate performance on holdout
+h2o.performance(model_best, h_holdout)
+```
+
